@@ -1,0 +1,168 @@
+{
+    "res": {
+        "input_path": "C:\\Users\\cjimk\\AppData\\Local\\Temp\\tmpiif6_p44.png",
+        "page_index": null,
+        "model_settings": {
+            "use_doc_preprocessor": false,
+            "use_textline_orientation": false
+        },
+        "dt_polys": [
+            [
+                [
+                    11,
+                    2
+                ],
+                [
+                    338,
+                    2
+                ],
+                [
+                    338,
+                    24
+                ],
+                [
+                    11,
+                    24
+                ]
+            ],
+            [
+                [
+                    38,
+                    36
+                ],
+                [
+                    406,
+                    36
+                ],
+                [
+                    406,
+                    55
+                ],
+                [
+                    38,
+                    55
+                ]
+            ],
+            [
+                [
+                    42,
+                    67
+                ],
+                [
+                    372,
+                    68
+                ],
+                [
+                    372,
+                    90
+                ],
+                [
+                    42,
+                    89
+                ]
+            ]
+        ],
+        "text_det_params": {
+            "limit_side_len": 64,
+            "limit_type": "min",
+            "thresh": 0.3,
+            "max_side_limit": 4000,
+            "box_thresh": 0.6,
+            "unclip_ratio": 1.5
+        },
+        "text_type": "general",
+        "textline_orientation_angles": [
+            -1,
+            -1,
+            -1
+        ],
+        "text_rec_score_thresh": 0.0,
+        "return_word_box": false,
+        "rec_texts": [
+            "\u2191[] Davidiscool222 930 points 13 hours ago",
+            "I miss commissioned remixes and b-sides",
+            "permalink embed save report reply"
+        ],
+        "rec_scores": [
+            0.9648886322975159,
+            0.9983791708946228,
+            0.9969030618667603
+        ],
+        "rec_polys": [
+            [
+                [
+                    11,
+                    2
+                ],
+                [
+                    338,
+                    2
+                ],
+                [
+                    338,
+                    24
+                ],
+                [
+                    11,
+                    24
+                ]
+            ],
+            [
+                [
+                    38,
+                    36
+                ],
+                [
+                    406,
+                    36
+                ],
+                [
+                    406,
+                    55
+                ],
+                [
+                    38,
+                    55
+                ]
+            ],
+            [
+                [
+                    42,
+                    67
+                ],
+                [
+                    372,
+                    68
+                ],
+                [
+                    372,
+                    90
+                ],
+                [
+                    42,
+                    89
+                ]
+            ]
+        ],
+        "rec_boxes": [
+            [
+                11,
+                2,
+                338,
+                24
+            ],
+            [
+                38,
+                36,
+                406,
+                55
+            ],
+            [
+                42,
+                67,
+                372,
+                90
+            ]
+        ]
+    }
+}

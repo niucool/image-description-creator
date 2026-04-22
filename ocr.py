@@ -134,7 +134,12 @@ class PaddleOCRApp:
             
             # Initialize PaddleOCR[citation:5][citation:7]
             # use_angle_cls=True enables text direction classification for better accuracy
-            self.ocr_model = PaddleOCR(use_angle_cls=True, lang=lang_code)
+            self.ocr_model = PaddleOCR(
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=False,
+                enable_mkldnn=False,
+                lang=lang_code)
             self.status_var.set(f"PaddleOCR ready - Language: {self.lang_var.get()}")
             
         except Exception as e:
@@ -228,13 +233,21 @@ class PaddleOCRApp:
                 confidence_info = []
                 
                 # result[0] contains the detection results for the first image
-                for line in result[0]:
-                    text = line[1][0]  # The recognized text
-                    confidence = line[1][1]  # Confidence score (0-1)
-                    
-                    if confidence >= min_confidence:
-                        extracted_lines.append(text)
-                        confidence_info.append(f"{confidence:.2f}")
+                if isinstance(result[0].json, dict) and 'res' in result[0].json:
+                    texts = result[0].json['res'].get('rec_texts', [])
+                    scores = result[0].json['res'].get('rec_scores', [])
+                    for text, confidence in zip(texts, scores):
+                        if confidence >= min_confidence:
+                            extracted_lines.append(text)
+                            confidence_info.append(f"{confidence:.2f}")
+                else:
+                    for line in result[0]:
+                        text = line[1][0]  # The recognized text
+                        confidence = line[1][1]  # Confidence score (0-1)
+                        
+                        if confidence >= min_confidence:
+                            extracted_lines.append(text)
+                            confidence_info.append(f"{confidence:.2f}")
                 
                 if extracted_lines:
                     full_text = "\n".join(extracted_lines)
