@@ -68,6 +68,11 @@ class PaddleOCRApp:
                                                  command=self.toggle_clipboard_monitor)
         self.auto_clipboard_cb.pack(side=tk.LEFT, padx=(10, 0))
         
+        self.auto_process_var = tk.BooleanVar(value=False)
+        self.auto_process_cb = ttk.Checkbutton(control_frame, text="Auto-process image", 
+                                                 variable=self.auto_process_var)
+        self.auto_process_cb.pack(side=tk.LEFT, padx=(10, 0))
+        
         # Paned window for split view
         paned = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True)
@@ -140,6 +145,44 @@ class PaddleOCRApp:
         # Setup Drag and Drop
         self.root.drop_target_register(DND_FILES)
         self.root.dnd_bind('<<Drop>>', self.handle_drop)
+        
+        # Setup hover events for image_label
+        self.image_label.bind('<Enter>', self.show_full_image)
+        self.image_label.bind('<Leave>', self.hide_full_image)
+
+    def show_full_image(self, event):
+        if self.current_image is None:
+            return
+            
+        self.hover_window = tk.Toplevel(self.root)
+        self.hover_window.overrideredirect(True)
+        
+        x = event.x_root + 15
+        y = event.y_root + 15
+        
+        # Ensure it fits on screen
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        
+        img_w, img_h = self.current_image.size
+        scale = min((screen_w - x - 20) / img_w, (screen_h - y - 20) / img_h, 1.0)
+        
+        if scale < 1.0:
+            new_size = (int(img_w * scale), int(img_h * scale))
+            img_to_show = self.current_image.resize(new_size, Image.Resampling.LANCZOS)
+        else:
+            img_to_show = self.current_image
+            
+        photo = ImageTk.PhotoImage(img_to_show)
+        label = ttk.Label(self.hover_window, image=photo, borderwidth=2, relief="solid")
+        label.image = photo
+        label.pack()
+        self.hover_window.geometry(f"+{x}+{y}")
+
+    def hide_full_image(self, event):
+        if hasattr(self, 'hover_window') and self.hover_window:
+            self.hover_window.destroy()
+            self.hover_window = None
 
     def handle_drop(self, event):
         file_path = event.data
@@ -155,6 +198,8 @@ class PaddleOCRApp:
             self.status_var.set(f"Image loaded from file. Click 'Process Image' to extract text")
             self.process_button.config(state='normal')
             self.clear_button.config(state='normal')
+            if self.auto_process_var.get():
+                self.root.after(100, self.process_image)
         except Exception as e:
             self.status_var.set(f"Error loading image from drop: {str(e)}")
             messagebox.showerror("Error", f"Failed to load image: {str(e)}")
@@ -187,6 +232,8 @@ class PaddleOCRApp:
                     self.status_var.set("Image auto-pasted from clipboard! Click 'Process Image'")
                     self.process_button.config(state='normal')
                     self.clear_button.config(state='normal')
+                    if self.auto_process_var.get():
+                        self.root.after(100, self.process_image)
         except Exception:
             pass
             
@@ -241,6 +288,8 @@ class PaddleOCRApp:
                 self.status_var.set("Image pasted successfully! Click 'Process Image' to extract text")
                 self.process_button.config(state='normal')
                 self.clear_button.config(state='normal')
+                if self.auto_process_var.get():
+                    self.root.after(100, self.process_image)
             else:
                 self.status_var.set("Clipboard does not contain an image. Please copy an image first.")
                 
