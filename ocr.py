@@ -137,7 +137,12 @@ class PaddleOCRApp:
             
             # Initialize PaddleOCR
             # use_angle_cls=True enables text direction classification for better accuracy
-            self.ocr_model = PaddleOCR(use_angle_cls=True, lang=lang_code)
+            self.ocr_model = PaddleOCR(
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=False,
+                enable_mkldnn=False,
+                lang=lang_code)
             self.status_var.set(f"PaddleOCR ready - Language: {self.lang_var.get()}")
             
         except Exception as e:
@@ -227,26 +232,21 @@ class PaddleOCRApp:
                 confidence_info = []
                 
                 # result[0] contains the detection results for the first image
-                for line in result:
-                    # # Handle different PaddleOCR output formats
-                    # if isinstance(line, (list, tuple)) and len(line) >= 2:
-                    #     # Check if line[1] contains text and confidence
-                    #     if isinstance(line[1], (list, tuple)) and len(line[1]) >= 2:
-                    #         text = line[1][0]  # The recognized text
-                    #         confidence = 1  # Confidence score (0-1)
-                    #     elif isinstance(line[1], str):
-                    #         # Some versions return simpler format
-                    #         text = line[1]
-                    #         confidence = 1.0
-                    #     else:
-                    #         continue
-                    # else:
-                    #     continue
-                    
-                    # if confidence >= min_confidence:
-                    #     extracted_lines.append(text)
-                    #     confidence_info.append(f"{confidence:.2f}")
-                    extracted_lines.extend(line.json['res']['rec_texts'])
+                if isinstance(result[0].json, dict) and 'res' in result[0].json:
+                    texts = result[0].json['res'].get('rec_texts', [])
+                    scores = result[0].json['res'].get('rec_scores', [])
+                    for text, confidence in zip(texts, scores):
+                        if confidence >= min_confidence:
+                            extracted_lines.append(text)
+                            confidence_info.append(f"{confidence:.2f}")
+                else:
+                    for line in result[0]:
+                        text = line[1][0]  # The recognized text
+                        confidence = line[1][1]  # Confidence score (0-1)
+                        
+                        if confidence >= min_confidence:
+                            extracted_lines.append(text)
+                            confidence_info.append(f"{confidence:.2f}")
                 
                 if extracted_lines:
                     full_text = "\n".join(extracted_lines)
