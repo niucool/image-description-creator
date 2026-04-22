@@ -1,11 +1,13 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageGrab
 import pyperclip
 import io
 import sys
 from paddleocr import PaddleOCR
 import numpy as np
+import tempfile
+import os
 
 class PaddleOCRApp:
     def __init__(self, root):
@@ -117,7 +119,8 @@ class PaddleOCRApp:
         
     def update_confidence_label(self, value):
         """Update confidence label when slider moves"""
-        self.confidence_label.setText(f"{float(value):.2f}")
+        # Fixed: Use config() instead of setText()
+        self.confidence_label.config(text=f"{float(value):.2f}")
         
     def setup_bindings(self):
         # Bind Ctrl+V to paste from clipboard
@@ -132,7 +135,7 @@ class PaddleOCRApp:
             # Get selected language code
             lang_code = self.languages[self.lang_var.get()]
             
-            # Initialize PaddleOCR[citation:5][citation:7]
+            # Initialize PaddleOCR
             # use_angle_cls=True enables text direction classification for better accuracy
             self.ocr_model = PaddleOCR(use_angle_cls=True, lang=lang_code)
             self.status_var.set(f"PaddleOCR ready - Language: {self.lang_var.get()}")
@@ -154,7 +157,6 @@ class PaddleOCRApp:
         """Handle image paste from clipboard"""
         try:
             # Get image from clipboard (requires PIL)
-            from PIL import ImageGrab
             clipboard_image = ImageGrab.grabclipboard()
             
             if clipboard_image is None:
@@ -207,14 +209,11 @@ class PaddleOCRApp:
             
             # Convert PIL Image to format PaddleOCR expects
             # Save to bytes, then read - simpler approach
-            import tempfile
-            import os
-            
             with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
                 temp_path = tmp_file.name
                 self.current_image.save(temp_path, 'PNG')
             
-            # Perform OCR using PaddleOCR[citation:3][citation:5]
+            # Perform OCR using PaddleOCR
             # Result format: list of lists containing [[coordinates], (text, confidence)]
             result = self.ocr_model.predict(temp_path)
             
@@ -228,13 +227,26 @@ class PaddleOCRApp:
                 confidence_info = []
                 
                 # result[0] contains the detection results for the first image
-                for line in result[0]:
-                    text = line[1][0]  # The recognized text
-                    confidence = line[1][1]  # Confidence score (0-1)
+                for line in result:
+                    # # Handle different PaddleOCR output formats
+                    # if isinstance(line, (list, tuple)) and len(line) >= 2:
+                    #     # Check if line[1] contains text and confidence
+                    #     if isinstance(line[1], (list, tuple)) and len(line[1]) >= 2:
+                    #         text = line[1][0]  # The recognized text
+                    #         confidence = 1  # Confidence score (0-1)
+                    #     elif isinstance(line[1], str):
+                    #         # Some versions return simpler format
+                    #         text = line[1]
+                    #         confidence = 1.0
+                    #     else:
+                    #         continue
+                    # else:
+                    #     continue
                     
-                    if confidence >= min_confidence:
-                        extracted_lines.append(text)
-                        confidence_info.append(f"{confidence:.2f}")
+                    # if confidence >= min_confidence:
+                    #     extracted_lines.append(text)
+                    #     confidence_info.append(f"{confidence:.2f}")
+                    extracted_lines.extend(line.json['res']['rec_texts'])
                 
                 if extracted_lines:
                     full_text = "\n".join(extracted_lines)
