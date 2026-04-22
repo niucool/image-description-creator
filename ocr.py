@@ -1,5 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
+from tkinterdnd2 import DND_FILES, TkinterDnD
 from PIL import Image, ImageTk, ImageGrab
 import pyperclip
 import io
@@ -34,6 +35,10 @@ class PaddleOCRApp:
         self.setup_bindings()
         self.init_ocr_model()
         
+        self.last_clipboard_image_hash = None
+        self.clipboard_monitor_running = False
+
+        
     def setup_ui(self):
         # Main frame
         main_frame = ttk.Frame(self.root, padding="10")
@@ -52,10 +57,16 @@ class PaddleOCRApp:
         lang_combo.bind("<<ComboboxSelected>>", self.on_language_change)
         
         # Instructions label
-        instruction_text = "📋 Press Ctrl+V to paste an image from clipboard\n"
+        instruction_text = "📋 Press Ctrl+V, or Drag & Drop an image file\n"
         instruction_text += "🖼️ Supports: PNG, JPEG, BMP, GIF | Built-in PaddleOCR engine"
         instructions = ttk.Label(control_frame, text=instruction_text, foreground='gray')
         instructions.pack(side=tk.LEFT, padx=(10, 0))
+        
+        self.auto_clipboard_var = tk.BooleanVar(value=False)
+        self.auto_clipboard_cb = ttk.Checkbutton(control_frame, text="Auto-paste from clipboard", 
+                                                 variable=self.auto_clipboard_var,
+                                                 command=self.toggle_clipboard_monitor)
+        self.auto_clipboard_cb.pack(side=tk.LEFT, padx=(10, 0))
         
         # Paned window for split view
         paned = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
@@ -125,6 +136,62 @@ class PaddleOCRApp:
     def setup_bindings(self):
         # Bind Ctrl+V to paste from clipboard
         self.root.bind('<Control-v>', self.paste_from_clipboard)
+        
+        # Setup Drag and Drop
+        self.root.drop_target_register(DND_FILES)
+        self.root.dnd_bind('<<Drop>>', self.handle_drop)
+
+    def handle_drop(self, event):
+        file_path = event.data
+        # tkinterdnd2 sometimes wraps paths in curly braces if they contain spaces
+        if file_path.startswith('{') and file_path.endswith('}'):
+            file_path = file_path[1:-1]
+        
+        try:
+            img = Image.open(file_path)
+            img.load()  # Ensure it's fully loaded
+            self.current_image = img
+            self.display_image(self.current_image)
+            self.status_var.set(f"Image loaded from file. Click 'Process Image' to extract text")
+            self.process_button.config(state='normal')
+            self.clear_button.config(state='normal')
+        except Exception as e:
+            self.status_var.set(f"Error loading image from drop: {str(e)}")
+            messagebox.showerror("Error", f"Failed to load image: {str(e)}")
+
+    def toggle_clipboard_monitor(self):
+        if self.auto_clipboard_var.get():
+            self.clipboard_monitor_running = True
+            try:
+                clip_img = ImageGrab.grabclipboard()
+                if isinstance(clip_img, Image.Image):
+                    self.last_clipboard_image_hash = hash(clip_img.tobytes())
+            except Exception:
+                pass
+            self.monitor_clipboard()
+        else:
+            self.clipboard_monitor_running = False
+
+    def monitor_clipboard(self):
+        if not self.clipboard_monitor_running:
+            return
+        
+        try:
+            clip_img = ImageGrab.grabclipboard()
+            if isinstance(clip_img, Image.Image):
+                img_hash = hash(clip_img.tobytes())
+                if img_hash != self.last_clipboard_image_hash:
+                    self.last_clipboard_image_hash = img_hash
+                    self.current_image = clip_img
+                    self.display_image(self.current_image)
+                    self.status_var.set("Image auto-pasted from clipboard! Click 'Process Image'")
+                    self.process_button.config(state='normal')
+                    self.clear_button.config(state='normal')
+        except Exception:
+            pass
+            
+        if self.clipboard_monitor_running:
+            self.root.after(1000, self.monitor_clipboard)
         
     def init_ocr_model(self):
         """Initialize PaddleOCR model - runs once at startup"""
@@ -296,7 +363,7 @@ class PaddleOCRApp:
 
 
 def main():
-    root = tk.Tk()
+    root = TkinterDnD.Tk()
     app = PaddleOCRApp(root)
     root.mainloop()
 
