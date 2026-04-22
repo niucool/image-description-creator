@@ -1,11 +1,13 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageGrab
 import pyperclip
 import io
 import sys
 from paddleocr import PaddleOCR
 import numpy as np
+import tempfile
+import os
 
 class PaddleOCRApp:
     def __init__(self, root):
@@ -117,7 +119,8 @@ class PaddleOCRApp:
         
     def update_confidence_label(self, value):
         """Update confidence label when slider moves"""
-        self.confidence_label.setText(f"{float(value):.2f}")
+        # Fixed: Use config() instead of setText()
+        self.confidence_label.config(text=f"{float(value):.2f}")
         
     def setup_bindings(self):
         # Bind Ctrl+V to paste from clipboard
@@ -132,7 +135,7 @@ class PaddleOCRApp:
             # Get selected language code
             lang_code = self.languages[self.lang_var.get()]
             
-            # Initialize PaddleOCR[citation:5][citation:7]
+            # Initialize PaddleOCR
             # use_angle_cls=True enables text direction classification for better accuracy
             self.ocr_model = PaddleOCR(
                 use_doc_orientation_classify=False,
@@ -159,7 +162,6 @@ class PaddleOCRApp:
         """Handle image paste from clipboard"""
         try:
             # Get image from clipboard (requires PIL)
-            from PIL import ImageGrab
             clipboard_image = ImageGrab.grabclipboard()
             
             if clipboard_image is None:
@@ -212,14 +214,11 @@ class PaddleOCRApp:
             
             # Convert PIL Image to format PaddleOCR expects
             # Save to bytes, then read - simpler approach
-            import tempfile
-            import os
-            
             with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
                 temp_path = tmp_file.name
                 self.current_image.save(temp_path, 'PNG')
             
-            # Perform OCR using PaddleOCR[citation:3][citation:5]
+            # Perform OCR using PaddleOCR
             # Result format: list of lists containing [[coordinates], (text, confidence)]
             result = self.ocr_model.predict(temp_path)
             
