@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
-from PIL import Image, ImageTk, ImageGrab
+from tkinterdnd2 import DND_FILES, TkinterDnD
+from PIL import Image, ImageTk, ImageGrab, ImageDraw
 import pyperclip
 import io
 import sys
@@ -17,6 +18,7 @@ class PaddleOCRApp:
         
         # Store the current image and OCR results
         self.current_image = None
+        self.annotated_image = None
         self.ocr_model = None
         self.current_ocr_result = None
         
@@ -33,6 +35,10 @@ class PaddleOCRApp:
         self.setup_ui()
         self.setup_bindings()
         self.init_ocr_model()
+        
+        self.last_clipboard_image_hash = None
+        self.clipboard_monitor_running = False
+
         
     def setup_ui(self):
         # Main frame
@@ -52,10 +58,21 @@ class PaddleOCRApp:
         lang_combo.bind("<<ComboboxSelected>>", self.on_language_change)
         
         # Instructions label
-        instruction_text = "📋 Press Ctrl+V to paste an image from clipboard\n"
+        instruction_text = "📋 Press Ctrl+V, or Drag & Drop an image file\n"
         instruction_text += "🖼️ Supports: PNG, JPEG, BMP, GIF | Built-in PaddleOCR engine"
         instructions = ttk.Label(control_frame, text=instruction_text, foreground='gray')
         instructions.pack(side=tk.LEFT, padx=(10, 0))
+        
+        self.auto_clipboard_var = tk.BooleanVar(value=False)
+        self.auto_clipboard_cb = ttk.Checkbutton(control_frame, text="Auto-paste from clipboard", 
+                                                 variable=self.auto_clipboard_var,
+                                                 command=self.toggle_clipboard_monitor)
+        self.auto_clipboard_cb.pack(side=tk.LEFT, padx=(10, 0))
+        
+        self.auto_process_var = tk.BooleanVar(value=False)
+        self.auto_process_cb = ttk.Checkbutton(control_frame, text="Auto-process image", 
+                                                 variable=self.auto_process_var)
+        self.auto_process_cb.pack(side=tk.LEFT, padx=(10, 0))
         
         # Paned window for split view
         paned = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
@@ -126,6 +143,107 @@ class PaddleOCRApp:
         # Bind Ctrl+V to paste from clipboard
         self.root.bind('<Control-v>', self.paste_from_clipboard)
         
+        # Setup Drag and Drop
+        self.root.drop_target_register(DND_FILES)
+        self.root.dnd_bind('<<Drop>>', self.handle_drop)
+        
+        # Setup hover events for image_label
+        self.image_label.bind('<Enter>', self.show_full_image)
+        self.image_label.bind('<Leave>', self.hide_full_image)
+
+    def show_full_image(self, event):
+        img_source = self.annotated_image if getattr(self, 'annotated_image', None) else self.current_image
+        if img_source is None:
+            return
+            
+        self.hover_window = tk.Toplevel(self.root)
+        self.hover_window.overrideredirect(True)
+        
+        x = event.x_root + 15
+        y = event.y_root + 15
+        
+        # Ensure it fits on screen
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        
+        img_w, img_h = img_source.size
+        scale = min((screen_w - x - 20) / img_w, (screen_h - y - 20) / img_h, 1.0)
+        
+        if scale < 1.0:
+            new_size = (int(img_w * scale), int(img_h * scale))
+            img_to_show = img_source.resize(new_size, Image.Resampling.LANCZOS)
+        else:
+            img_to_show = img_source
+            
+        photo = ImageTk.PhotoImage(img_to_show)
+        label = ttk.Label(self.hover_window, image=photo, borderwidth=2, relief="solid")
+        label.image = photo
+        label.pack()
+        self.hover_window.geometry(f"+{x}+{y}")
+
+    def hide_full_image(self, event):
+        if hasattr(self, 'hover_window') and self.hover_window:
+            self.hover_window.destroy()
+            self.hover_window = None
+
+    def handle_drop(self, event):
+        file_path = event.data
+        # tkinterdnd2 sometimes wraps paths in curly braces if they contain spaces
+        if file_path.startswith('{') and file_path.endswith('}'):
+            file_path = file_path[1:-1]
+        
+        try:
+            img = Image.open(file_path)
+            img.load()  # Ensure it's fully loaded
+            self.current_image = img
+            self.annotated_image = None
+            self.display_image(self.current_image)
+            self.status_var.set(f"Image loaded from file. Click 'Process Image' to extract text")
+            self.process_button.config(state='normal')
+            self.clear_button.config(state='normal')
+            if self.auto_process_var.get():
+                self.root.after(100, self.process_image)
+        except Exception as e:
+            self.status_var.set(f"Error loading image from drop: {str(e)}")
+            messagebox.showerror("Error", f"Failed to load image: {str(e)}")
+
+    def toggle_clipboard_monitor(self):
+        if self.auto_clipboard_var.get():
+            self.clipboard_monitor_running = True
+            try:
+                clip_img = ImageGrab.grabclipboard()
+                if isinstance(clip_img, Image.Image):
+                    self.last_clipboard_image_hash = hash(clip_img.tobytes())
+            except Exception:
+                pass
+            self.monitor_clipboard()
+        else:
+            self.clipboard_monitor_running = False
+
+    def monitor_clipboard(self):
+        if not self.clipboard_monitor_running:
+            return
+        
+        try:
+            clip_img = ImageGrab.grabclipboard()
+            if isinstance(clip_img, Image.Image):
+                img_hash = hash(clip_img.tobytes())
+                if img_hash != self.last_clipboard_image_hash:
+                    self.last_clipboard_image_hash = img_hash
+                    self.current_image = clip_img
+                    self.annotated_image = None
+                    self.display_image(self.current_image)
+                    self.status_var.set("Image auto-pasted from clipboard! Click 'Process Image'")
+                    self.process_button.config(state='normal')
+                    self.clear_button.config(state='normal')
+                    if self.auto_process_var.get():
+                        self.root.after(100, self.process_image)
+        except Exception:
+            pass
+            
+        if self.clipboard_monitor_running:
+            self.root.after(1000, self.monitor_clipboard)
+        
     def init_ocr_model(self):
         """Initialize PaddleOCR model - runs once at startup"""
         try:
@@ -170,10 +288,13 @@ class PaddleOCRApp:
                 
             if isinstance(clipboard_image, Image.Image):
                 self.current_image = clipboard_image
+                self.annotated_image = None
                 self.display_image(self.current_image)
                 self.status_var.set("Image pasted successfully! Click 'Process Image' to extract text")
                 self.process_button.config(state='normal')
                 self.clear_button.config(state='normal')
+                if self.auto_process_var.get():
+                    self.root.after(100, self.process_image)
             else:
                 self.status_var.set("Clipboard does not contain an image. Please copy an image first.")
                 
@@ -231,22 +352,55 @@ class PaddleOCRApp:
                 extracted_lines = []
                 confidence_info = []
                 
+                annotated_image = self.current_image.copy()
+                draw = ImageDraw.Draw(annotated_image)
+                
                 # result[0] contains the detection results for the first image
-                if isinstance(result[0].json, dict) and 'res' in result[0].json:
-                    texts = result[0].json['res'].get('rec_texts', [])
-                    scores = result[0].json['res'].get('rec_scores', [])
-                    for text, confidence in zip(texts, scores):
+                if hasattr(result[0], 'json') and isinstance(result[0].json, dict) and 'res' in result[0].json:
+                    res = result[0].json['res']
+                    texts = res.get('rec_texts', [])
+                    scores = res.get('rec_scores', [])
+                    polys = res.get('dt_polys', []) or res.get('rec_polys', [])
+                    
+                    for i, (text, confidence) in enumerate(zip(texts, scores)):
                         if confidence >= min_confidence:
                             extracted_lines.append(text)
                             confidence_info.append(f"{confidence:.2f}")
+                            if i < len(polys):
+                                poly = polys[i]
+                                points = [(p[0], p[1]) for p in poly]
+                                if points:
+                                    points.append(points[0])
+                                    draw.line(points, fill="red", width=2)
+                elif isinstance(result[0], dict) and 'res' in result[0]:
+                    res = result[0]['res']
+                    texts = res.get('rec_texts', [])
+                    scores = res.get('rec_scores', [])
+                    polys = res.get('dt_polys', []) or res.get('rec_polys', [])
+                    
+                    for i, (text, confidence) in enumerate(zip(texts, scores)):
+                        if confidence >= min_confidence:
+                            extracted_lines.append(text)
+                            confidence_info.append(f"{confidence:.2f}")
+                            if i < len(polys):
+                                poly = polys[i]
+                                points = [(p[0], p[1]) for p in poly]
+                                if points:
+                                    points.append(points[0])
+                                    draw.line(points, fill="red", width=2)
                 else:
                     for line in result[0]:
+                        poly = line[0]
                         text = line[1][0]  # The recognized text
                         confidence = line[1][1]  # Confidence score (0-1)
                         
                         if confidence >= min_confidence:
                             extracted_lines.append(text)
                             confidence_info.append(f"{confidence:.2f}")
+                            points = [(p[0], p[1]) for p in poly]
+                            if points:
+                                points.append(points[0])
+                                draw.line(points, fill="red", width=2)
                 
                 if extracted_lines:
                     full_text = "\n".join(extracted_lines)
@@ -254,6 +408,9 @@ class PaddleOCRApp:
                     # Clear text widget and insert extracted text
                     self.text_widget.delete(1.0, tk.END)
                     self.text_widget.insert(1.0, full_text)
+                    
+                    self.annotated_image = annotated_image
+                    self.display_image(self.annotated_image)
                     
                     # Optionally show confidence info in status
                     avg_conf = sum(float(c) for c in confidence_info) / len(confidence_info) if confidence_info else 0
@@ -286,6 +443,7 @@ class PaddleOCRApp:
     def clear_all(self):
         """Clear the image and text"""
         self.current_image = None
+        self.annotated_image = None
         self.current_ocr_result = None
         self.image_label.config(image='', text="No image pasted yet\n\nPress Ctrl+V to paste an image")
         self.image_label.image = None
@@ -296,7 +454,7 @@ class PaddleOCRApp:
 
 
 def main():
-    root = tk.Tk()
+    root = TkinterDnD.Tk()
     app = PaddleOCRApp(root)
     root.mainloop()
 
