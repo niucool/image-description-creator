@@ -1,7 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 from tkinterdnd2 import DND_FILES, TkinterDnD
-from PIL import Image, ImageTk, ImageGrab
+from PIL import Image, ImageTk, ImageGrab, ImageDraw
 import pyperclip
 import io
 import sys
@@ -18,6 +18,7 @@ class PaddleOCRApp:
         
         # Store the current image and OCR results
         self.current_image = None
+        self.annotated_image = None
         self.ocr_model = None
         self.current_ocr_result = None
         
@@ -151,7 +152,8 @@ class PaddleOCRApp:
         self.image_label.bind('<Leave>', self.hide_full_image)
 
     def show_full_image(self, event):
-        if self.current_image is None:
+        img_source = self.annotated_image if getattr(self, 'annotated_image', None) else self.current_image
+        if img_source is None:
             return
             
         self.hover_window = tk.Toplevel(self.root)
@@ -164,14 +166,14 @@ class PaddleOCRApp:
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
         
-        img_w, img_h = self.current_image.size
+        img_w, img_h = img_source.size
         scale = min((screen_w - x - 20) / img_w, (screen_h - y - 20) / img_h, 1.0)
         
         if scale < 1.0:
             new_size = (int(img_w * scale), int(img_h * scale))
-            img_to_show = self.current_image.resize(new_size, Image.Resampling.LANCZOS)
+            img_to_show = img_source.resize(new_size, Image.Resampling.LANCZOS)
         else:
-            img_to_show = self.current_image
+            img_to_show = img_source
             
         photo = ImageTk.PhotoImage(img_to_show)
         label = ttk.Label(self.hover_window, image=photo, borderwidth=2, relief="solid")
@@ -194,6 +196,7 @@ class PaddleOCRApp:
             img = Image.open(file_path)
             img.load()  # Ensure it's fully loaded
             self.current_image = img
+            self.annotated_image = None
             self.display_image(self.current_image)
             self.status_var.set(f"Image loaded from file. Click 'Process Image' to extract text")
             self.process_button.config(state='normal')
@@ -228,6 +231,7 @@ class PaddleOCRApp:
                 if img_hash != self.last_clipboard_image_hash:
                     self.last_clipboard_image_hash = img_hash
                     self.current_image = clip_img
+                    self.annotated_image = None
                     self.display_image(self.current_image)
                     self.status_var.set("Image auto-pasted from clipboard! Click 'Process Image'")
                     self.process_button.config(state='normal')
@@ -284,6 +288,7 @@ class PaddleOCRApp:
                 
             if isinstance(clipboard_image, Image.Image):
                 self.current_image = clipboard_image
+                self.annotated_image = None
                 self.display_image(self.current_image)
                 self.status_var.set("Image pasted successfully! Click 'Process Image' to extract text")
                 self.process_button.config(state='normal')
@@ -347,22 +352,55 @@ class PaddleOCRApp:
                 extracted_lines = []
                 confidence_info = []
                 
+                annotated_image = self.current_image.copy()
+                draw = ImageDraw.Draw(annotated_image)
+                
                 # result[0] contains the detection results for the first image
-                if isinstance(result[0].json, dict) and 'res' in result[0].json:
-                    texts = result[0].json['res'].get('rec_texts', [])
-                    scores = result[0].json['res'].get('rec_scores', [])
-                    for text, confidence in zip(texts, scores):
+                if hasattr(result[0], 'json') and isinstance(result[0].json, dict) and 'res' in result[0].json:
+                    res = result[0].json['res']
+                    texts = res.get('rec_texts', [])
+                    scores = res.get('rec_scores', [])
+                    polys = res.get('dt_polys', []) or res.get('rec_polys', [])
+                    
+                    for i, (text, confidence) in enumerate(zip(texts, scores)):
                         if confidence >= min_confidence:
                             extracted_lines.append(text)
                             confidence_info.append(f"{confidence:.2f}")
+                            if i < len(polys):
+                                poly = polys[i]
+                                points = [(p[0], p[1]) for p in poly]
+                                if points:
+                                    points.append(points[0])
+                                    draw.line(points, fill="red", width=2)
+                elif isinstance(result[0], dict) and 'res' in result[0]:
+                    res = result[0]['res']
+                    texts = res.get('rec_texts', [])
+                    scores = res.get('rec_scores', [])
+                    polys = res.get('dt_polys', []) or res.get('rec_polys', [])
+                    
+                    for i, (text, confidence) in enumerate(zip(texts, scores)):
+                        if confidence >= min_confidence:
+                            extracted_lines.append(text)
+                            confidence_info.append(f"{confidence:.2f}")
+                            if i < len(polys):
+                                poly = polys[i]
+                                points = [(p[0], p[1]) for p in poly]
+                                if points:
+                                    points.append(points[0])
+                                    draw.line(points, fill="red", width=2)
                 else:
                     for line in result[0]:
+                        poly = line[0]
                         text = line[1][0]  # The recognized text
                         confidence = line[1][1]  # Confidence score (0-1)
                         
                         if confidence >= min_confidence:
                             extracted_lines.append(text)
                             confidence_info.append(f"{confidence:.2f}")
+                            points = [(p[0], p[1]) for p in poly]
+                            if points:
+                                points.append(points[0])
+                                draw.line(points, fill="red", width=2)
                 
                 if extracted_lines:
                     full_text = "\n".join(extracted_lines)
@@ -370,6 +408,9 @@ class PaddleOCRApp:
                     # Clear text widget and insert extracted text
                     self.text_widget.delete(1.0, tk.END)
                     self.text_widget.insert(1.0, full_text)
+                    
+                    self.annotated_image = annotated_image
+                    self.display_image(self.annotated_image)
                     
                     # Optionally show confidence info in status
                     avg_conf = sum(float(c) for c in confidence_info) / len(confidence_info) if confidence_info else 0
@@ -402,6 +443,7 @@ class PaddleOCRApp:
     def clear_all(self):
         """Clear the image and text"""
         self.current_image = None
+        self.annotated_image = None
         self.current_ocr_result = None
         self.image_label.config(image='', text="No image pasted yet\n\nPress Ctrl+V to paste an image")
         self.image_label.image = None
