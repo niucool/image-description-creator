@@ -22,6 +22,7 @@ class PaddleOCRApp:
         self.annotated_image = None
         self.ocr_model = None
         self.current_ocr_result = None
+        self.raw_ocr_text = None  # Stores the original full OCR text (unformatted)
 
         # Output type for formatting (tweet, tweet thread, etc.)
         self.output_type_var = tk.StringVar(value="tweet")
@@ -98,6 +99,7 @@ class PaddleOCRApp:
             width=14,
         )
         output_combo.pack(side=tk.LEFT, padx=(0, 5))
+        output_combo.bind("<<ComboboxSelected>>", self.on_output_type_change)
 
         # Paned window for split view
         paned = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
@@ -557,6 +559,138 @@ class PaddleOCRApp:
 
         return bool(timestamp_pattern.search(text.strip()))
 
+    def is_statistics_line(self, text):
+        """
+        Detect lines that contain only statistics, engagement metrics, view counts,
+        dates, or other non-content metadata (superfluous text).
+
+        Detects patterns like:
+        - '42 Retweets 4 Quotes 1,567 Likes'
+        - '90.3K Views' / '61.8K' / '3.3M' / '80.4K'
+        - 'Q281 t16,679' / 'D3 172 1,379 ill 80.4K'
+        - '8:44 · 04 Dec 23 · 90.3K Views'
+        - '04 Dec 23' (date-only lines)
+        - '1.2M' / '16,679' / 't16,679' (pure number/abbreviation lines)
+        """
+        if not text or not text.strip():
+            return False
+
+        stripped = text.strip()
+
+        # Pattern 1: Engagement keywords with numbers
+        # e.g. "42 Retweets 4 Quotes 1,567 Likes"
+        # e.g. "90.3K Views" / "1.2M Views"
+        engagement_keywords = [
+            r'Retweets?', r'Quotes?', r'Likes?', r'Views?', r'Reposts?',
+            r'Replies?', r'Comments?', r'Shares?', r'Saves?', r'Bookmarks?',
+            r'Impressions?', r'Engagements?', r'Followers?', r'Following?',
+            r'Subscribers?', r'Liked', r'Reposted', r'Follow(?:ing)?',
+        ]
+        # Build a pattern that matches a line consisting mostly of numbers + these keywords
+        # Allow: numbers (with K/M/B suffixes), commas, dots, the keywords, and some noise chars
+        engagement_pattern = (
+            r'^'
+            r'[0-9,.\sKkMmBbTt' + ''.join(chr(c) for c in range(0x00A0, 0x00C0))  # include some unicode spaces
+            + r']*'
+            r'(?:' + '|'.join(engagement_keywords) + r')'
+            r'[0-9,.\sKkMmBbTt]*'
+            r'(?:' + '|'.join(engagement_keywords) + r')?'
+            r'[0-9,.\sKkMmBbTt]*'
+            r'(?:' + '|'.join(engagement_keywords) + r')?'
+            r'[0-9,.\sKkMmBbTt]*'
+            r'$'
+        )
+        if re.match(engagement_pattern, stripped, re.IGNORECASE):
+            return True
+
+        # Pattern 2: Date format "04 Dec 23" or "Dec 04, 2023" as the entire line
+        date_pattern = re.compile(
+            r'^'
+            r'(?:'
+            r'\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{2,4}'
+            r'|'
+            r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+\d{2,4}'
+            r')'
+            r'\s*$',
+            re.IGNORECASE,
+        )
+        if date_pattern.match(stripped):
+            return True
+
+        # Pattern 3: Time + date + stats combo
+        # e.g. "8:44 · 04 Dec 23 · 90.3K Views"
+        time_date_stats_pattern = re.compile(
+            r'^'
+            r'\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?'  # time
+            r'\s*[·\-–]\s*'  # separator
+            r'\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{2,4}'  # date
+            r'(?:\s*[·\-–]\s*.+)?'  # optional more stuff after
+            r'\s*$',
+            re.IGNORECASE,
+        )
+        if time_date_stats_pattern.match(stripped):
+            return True
+
+        # Pattern 4: Lines that are mostly numbers/abbreviations with no real words
+        # e.g. "Q281 t16,679" "61.8K ill 3.3M 8" "D3 172 1,379 ill 80.4K"
+        # These consist of: optional letter prefix + numbers, commas, dots, K/M/B suffixes,
+        # and at most 1-2 short "noise" words (like "ill", "t", "Q", "D")
+        # Count "real words" (3+ alphabetic chars) vs non-word tokens
+        tokens = stripped.split()
+        real_word_count = 0
+        stat_token_count = 0
+        for token in tokens:
+            # Check if it's a stat token: number-like (with K/M/B, commas, dots)
+            if re.match(r'^[A-Za-z]?\d[\d,.]*[KkMmBbTt]?$', token):
+                stat_token_count += 1
+            # Check if it's a short noise word (1-2 chars, all alpha)
+            elif re.match(r'^[A-Za-z]{1,2}$', token):
+                stat_token_count += 1
+            # Check if it's a pure number with commas
+            elif re.match(r'^[\d,]+$', token):
+                stat_token_count += 1
+            # Check if it's a number+K/M suffix
+            elif re.match(r'^\d+(?:\.\d+)?[KkMmBbTt]$', token):
+                stat_token_count += 1
+            # Otherwise it's a real word
+            else:
+                real_word_count += 1
+
+        # If line has at least 2 tokens and >80% are stat tokens, it's a stat line
+        if len(tokens) >= 2 and stat_token_count > 0 and real_word_count == 0:
+            return True
+        # Also catch lines with 1 real word and rest stats (e.g. "61.8K ill 3.3M 8")
+        if len(tokens) >= 3 and stat_token_count >= 2 and real_word_count <= 1:
+            return True
+
+        # Pattern 5: Single token that is just a number/abbreviation (e.g. "16,679", "61.8K")
+        # Only flag if it looks like a stat and is on its own line
+        if len(tokens) == 1:
+            single = tokens[0]
+            # Pure number with optional commas
+            if re.match(r'^[\d,]+$', single) and len(single) >= 3:
+                return True
+            # Number with K/M/B suffix
+            if re.match(r'^\d+(?:\.\d+)?[KkMmBbTt]$', single):
+                return True
+            # Letter + number combo like "Q281", "D3", "t16,679"
+            if re.match(r'^[A-Za-z]\d[\d,]*[KkMmBbTt]?$', single):
+                return True
+
+        return False
+
+    def strip_statistics(self, text):
+        """Remove lines that contain only statistics/engagement/date metadata."""
+        if not text:
+            return text
+        lines = text.split("\n")
+        cleaned = [
+            line
+            for line in lines
+            if not self.is_statistics_line(line.strip())
+        ]
+        return "\n".join(cleaned)
+
     def detect_handles(self, text):
         """
         Scan OCR text for Twitter handles (@username).
@@ -683,12 +817,13 @@ class PaddleOCRApp:
     def format_as_tweet(self, text):
         """
         Format as: 'tweet by @handle that says [body]'
-        Strips timestamps and handle lines from the body.
+        Strips timestamps, statistics, and handle lines from the body.
         """
         if not text:
             return text
 
         cleaned = self.strip_timestamps(text)
+        cleaned = self.strip_statistics(cleaned)
         handles, cleaned = self.detect_handles(cleaned)
         cleaned = cleaned.strip()
 
@@ -711,6 +846,7 @@ class PaddleOCRApp:
             return text
 
         cleaned = self.strip_timestamps(text)
+        cleaned = self.strip_statistics(cleaned)
         handles, cleaned = self.detect_handles(cleaned)
         cleaned = cleaned.strip()
 
@@ -742,6 +878,7 @@ class PaddleOCRApp:
             return text
 
         cleaned = self.strip_timestamps(text)
+        cleaned = self.strip_statistics(cleaned)
         handles, cleaned = self.detect_handles(cleaned)
         cleaned = cleaned.strip()
 
@@ -849,9 +986,13 @@ class PaddleOCRApp:
             # We limit the max dimension to 1280px while preserving aspect ratio.
             img = self.current_image
             max_dim = 1280
+            scale_x = 1.0
+            scale_y = 1.0
             if max(img.size) > max_dim:
                 scale = max_dim / max(img.size)
                 new_size = (int(img.width * scale), int(img.height * scale))
+                scale_x = self.current_image.width / new_size[0]
+                scale_y = self.current_image.height / new_size[1]
                 img = img.resize(new_size, Image.Resampling.LANCZOS)
                 self.status_var.set(f"Resized image from {self.current_image.size} to {new_size} for OCR...")
                 self.root.update()
@@ -888,6 +1029,11 @@ class PaddleOCRApp:
                 annotated_image = self.current_image.copy()
                 draw = ImageDraw.Draw(annotated_image)
                 
+                # Helper to scale polygon coordinates from OCR-resized space back
+                # to original image space, so red boxes are drawn correctly.
+                def scale_poly(poly):
+                    return [(int(p[0] * scale_x), int(p[1] * scale_y)) for p in poly]
+                
                 # result[0] contains the detection results for the first image
                 # Access .json once to avoid triggering _to_json() multiple times
                 # (hasattr calls the property getter, so each access is expensive)
@@ -904,12 +1050,14 @@ class PaddleOCRApp:
                             confidence_info.append(f"{confidence:.2f}")
                             if i < len(polys):
                                 poly = polys[i]
+                                # Scale polygon coordinates to original image space
+                                scaled_poly = scale_poly(poly)
                                 # Convert polygon to bounding box [x1, y1, x2, y2]
-                                all_x = [p[0] for p in poly]
-                                all_y = [p[1] for p in poly]
+                                all_x = [p[0] for p in scaled_poly]
+                                all_y = [p[1] for p in scaled_poly]
                                 bbox = [min(all_x), min(all_y), max(all_x), max(all_y)]
                                 rec_boxes.append(bbox)
-                                points = [(p[0], p[1]) for p in poly]
+                                points = [(p[0], p[1]) for p in scaled_poly]
                                 if points:
                                     points.append(points[0])
                                     draw.line(points, fill="red", width=2)
@@ -925,12 +1073,14 @@ class PaddleOCRApp:
                             confidence_info.append(f"{confidence:.2f}")
                             if i < len(polys):
                                 poly = polys[i]
+                                # Scale polygon coordinates to original image space
+                                scaled_poly = scale_poly(poly)
                                 # Convert polygon to bounding box [x1, y1, x2, y2]
-                                all_x = [p[0] for p in poly]
-                                all_y = [p[1] for p in poly]
+                                all_x = [p[0] for p in scaled_poly]
+                                all_y = [p[1] for p in scaled_poly]
                                 bbox = [min(all_x), min(all_y), max(all_x), max(all_y)]
                                 rec_boxes.append(bbox)
-                                points = [(p[0], p[1]) for p in poly]
+                                points = [(p[0], p[1]) for p in scaled_poly]
                                 if points:
                                     points.append(points[0])
                                     draw.line(points, fill="red", width=2)
@@ -943,12 +1093,14 @@ class PaddleOCRApp:
                         if confidence >= min_confidence:
                             extracted_lines.append(text)
                             confidence_info.append(f"{confidence:.2f}")
+                            # Scale polygon coordinates to original image space
+                            scaled_poly = scale_poly(poly)
                             # Convert polygon to bounding box
-                            all_x = [p[0] for p in poly]
-                            all_y = [p[1] for p in poly]
+                            all_x = [p[0] for p in scaled_poly]
+                            all_y = [p[1] for p in scaled_poly]
                             bbox = [min(all_x), min(all_y), max(all_x), max(all_y)]
                             rec_boxes.append(bbox)
-                            points = [(p[0], p[1]) for p in poly]
+                            points = [(p[0], p[1]) for p in scaled_poly]
                             if points:
                                 points.append(points[0])
                                 draw.line(points, fill="red", width=2)
@@ -956,6 +1108,9 @@ class PaddleOCRApp:
                 if extracted_lines:
                     # Use paragraph-aware formatting with bounding boxes
                     raw_text = self.format_text_with_paragraphs(extracted_lines, rec_boxes)
+                    
+                    # Save the original full OCR text for dynamic reformatting
+                    self.raw_ocr_text = raw_text
                     
                     # Apply selected output formatting
                     output_type = self.output_type_var.get()
@@ -994,6 +1149,28 @@ class PaddleOCRApp:
             self.status_var.set(f"OCR Error: {str(e)}")
             messagebox.showerror("OCR Error", f"Failed to process image: {str(e)}")
     
+    def on_output_type_change(self, event=None):
+        """Re-format the displayed text when the output type dropdown changes."""
+        if self.raw_ocr_text is None:
+            return  # No OCR results yet
+
+        output_type = self.output_type_var.get()
+        formatter = {
+            "tweet": self.format_as_tweet,
+            "tweet thread": self.format_as_tweet_thread,
+            "quote retweet": self.format_as_quote_retweet,
+            "reddit post": self.format_as_reddit_post,
+            "reddit comment": self.format_as_reddit_comment,
+            "reddit thread": self.format_as_reddit_thread,
+        }
+        formatter_func = formatter.get(output_type, self.format_as_tweet)
+        full_text = formatter_func(self.raw_ocr_text)
+
+        # Update the text widget with the newly formatted text
+        self.text_widget.delete(1.0, tk.END)
+        self.text_widget.insert(1.0, full_text)
+        self.status_var.set(f"Reformatted as {output_type}")
+
     def copy_to_clipboard(self):
         """Copy extracted text to clipboard with output formatting"""
         text = self.text_widget.get(1.0, tk.END).strip()
@@ -1008,7 +1185,9 @@ class PaddleOCRApp:
                 "reddit thread": self.format_as_reddit_thread,
             }
             formatter_func = formatter.get(output_type, self.format_as_tweet)
-            formatted_text = formatter_func(text)
+            # Use raw_ocr_text if available, otherwise fall back to widget text
+            source_text = self.raw_ocr_text if self.raw_ocr_text else text
+            formatted_text = formatter_func(source_text)
             pyperclip.copy(formatted_text)
             self.status_var.set(
                 f"Copied {len(formatted_text)} characters as {output_type}!"
@@ -1023,6 +1202,7 @@ class PaddleOCRApp:
         self.current_image = None
         self.annotated_image = None
         self.current_ocr_result = None
+        self.raw_ocr_text = None
         self.image_label.config(image='', text="No image pasted yet\n\nPress Ctrl+V to paste an image")
         self.image_label.image = None
         self.text_widget.delete(1.0, tk.END)
