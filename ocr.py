@@ -22,6 +22,7 @@ class PaddleOCRApp:
         self.annotated_image = None
         self.ocr_model = None
         self.current_ocr_result = None
+        self.current_raw_text = ""
 
         # Output type for formatting (tweet, tweet thread, etc.)
         self.output_type_var = tk.StringVar(value="tweet")
@@ -61,12 +62,6 @@ class PaddleOCRApp:
         lang_combo.pack(side=tk.LEFT, padx=(0, 10))
         lang_combo.bind("<<ComboboxSelected>>", self.on_language_change)
         
-        # Instructions label
-        instruction_text = "📋 Press Ctrl+V, or Drag & Drop an image file\n"
-        instruction_text += "🖼️ Supports: PNG, JPEG, BMP, GIF | Built-in PaddleOCR engine"
-        instructions = ttk.Label(control_frame, text=instruction_text, foreground='gray')
-        instructions.pack(side=tk.LEFT, padx=(10, 0))
-        
         self.auto_clipboard_var = tk.BooleanVar(value=False)
         self.auto_clipboard_cb = ttk.Checkbutton(control_frame, text="Auto-paste from clipboard", 
                                                  variable=self.auto_clipboard_var,
@@ -98,6 +93,14 @@ class PaddleOCRApp:
             width=14,
         )
         output_combo.pack(side=tk.LEFT, padx=(0, 5))
+        output_combo.bind("<<ComboboxSelected>>", self.on_output_type_change)
+
+        # Instructions label
+        instruction_text = "📋 Press Ctrl+V, or Drag & Drop an image file\n"
+        instruction_text += "🖼️ Supports: PNG, JPEG, BMP, GIF | Built-in PaddleOCR engine"
+        instructions = ttk.Label(control_frame, text=instruction_text, foreground='gray')
+        instructions.pack(side=tk.LEFT, padx=(10, 0))
+        
 
         # Paned window for split view
         paned = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
@@ -111,20 +114,35 @@ class PaddleOCRApp:
         self.image_label = ttk.Label(self.image_frame, text="No image pasted yet\n\nPress Ctrl+V to paste an image")
         self.image_label.pack(expand=True, fill=tk.BOTH, padx=5, pady=5)
         
-        # Right frame for text output
-        self.text_frame = ttk.LabelFrame(paned, text="Extracted Text", padding="5")
-        paned.add(self.text_frame, weight=1)
+        # Middle frame for original text output
+        self.original_text_frame = ttk.LabelFrame(paned, text="Original OCR Text", padding="5")
+        paned.add(self.original_text_frame, weight=1)
         
         # Text widget with scrollbar
-        text_container = ttk.Frame(self.text_frame)
-        text_container.pack(fill=tk.BOTH, expand=True)
+        original_text_container = ttk.Frame(self.original_text_frame)
+        original_text_container.pack(fill=tk.BOTH, expand=True)
         
-        self.text_widget = tk.Text(text_container, wrap=tk.WORD, font=('Arial', 10))
-        scrollbar = ttk.Scrollbar(text_container, orient=tk.VERTICAL, command=self.text_widget.yview)
-        self.text_widget.configure(yscrollcommand=scrollbar.set)
+        self.original_text_widget = tk.Text(original_text_container, wrap=tk.WORD, font=('Arial', 10))
+        orig_scrollbar = ttk.Scrollbar(original_text_container, orient=tk.VERTICAL, command=self.original_text_widget.yview)
+        self.original_text_widget.configure(yscrollcommand=orig_scrollbar.set)
         
-        self.text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.original_text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        orig_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Right frame for formatted text output
+        self.formatted_text_frame = ttk.LabelFrame(paned, text="Formatted Text", padding="5")
+        paned.add(self.formatted_text_frame, weight=1)
+        
+        # Text widget with scrollbar
+        formatted_text_container = ttk.Frame(self.formatted_text_frame)
+        formatted_text_container.pack(fill=tk.BOTH, expand=True)
+        
+        self.formatted_text_widget = tk.Text(formatted_text_container, wrap=tk.WORD, font=('Arial', 10))
+        fmt_scrollbar = ttk.Scrollbar(formatted_text_container, orient=tk.VERTICAL, command=self.formatted_text_widget.yview)
+        self.formatted_text_widget.configure(yscrollcommand=fmt_scrollbar.set)
+        
+        self.formatted_text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        fmt_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
         # Button frame
         button_frame = ttk.Frame(main_frame)
@@ -300,6 +318,33 @@ class PaddleOCRApp:
         """Reinitialize OCR model when language changes"""
         if self.ocr_model:
             self.init_ocr_model()
+
+    def on_output_type_change(self, event=None):
+        """Update the formatted text when output type changes"""
+        self.update_formatted_text()
+        
+    def update_formatted_text(self):
+        """Re-format the original text and update the formatted text widget"""
+        current_text = self.original_text_widget.get(1.0, tk.END).strip()
+        if not current_text:
+            self.formatted_text_widget.delete(1.0, tk.END)
+            return
+            
+        output_type = self.output_type_var.get()
+        formatter = {
+            "tweet": self.format_as_tweet,
+            "tweet thread": self.format_as_tweet_thread,
+            "quote retweet": self.format_as_quote_retweet,
+            "reddit post": self.format_as_reddit_post,
+            "reddit comment": self.format_as_reddit_comment,
+            "reddit thread": self.format_as_reddit_thread,
+        }
+        formatter_func = formatter.get(output_type, self.format_as_tweet)
+        
+        full_text = formatter_func(current_text)
+        
+        self.formatted_text_widget.delete(1.0, tk.END)
+        self.formatted_text_widget.insert(1.0, full_text)
 
     # ---------------------------------------------------------------------------
     #  Paragraph detection helpers (imported from deepseektest.py)
@@ -956,23 +1001,14 @@ class PaddleOCRApp:
                 if extracted_lines:
                     # Use paragraph-aware formatting with bounding boxes
                     raw_text = self.format_text_with_paragraphs(extracted_lines, rec_boxes)
+                    self.current_raw_text = raw_text
                     
-                    # Apply selected output formatting
-                    output_type = self.output_type_var.get()
-                    formatter = {
-                        "tweet": self.format_as_tweet,
-                        "tweet thread": self.format_as_tweet_thread,
-                        "quote retweet": self.format_as_quote_retweet,
-                        "reddit post": self.format_as_reddit_post,
-                        "reddit comment": self.format_as_reddit_comment,
-                        "reddit thread": self.format_as_reddit_thread,
-                    }
-                    formatter_func = formatter.get(output_type, self.format_as_tweet)
-                    full_text = formatter_func(raw_text)
+                    # Clear original text widget and insert raw text
+                    self.original_text_widget.delete(1.0, tk.END)
+                    self.original_text_widget.insert(1.0, raw_text)
                     
-                    # Clear text widget and insert formatted text
-                    self.text_widget.delete(1.0, tk.END)
-                    self.text_widget.insert(1.0, full_text)
+                    # Update formatted text widget based on output_combo
+                    self.update_formatted_text()
                     
                     self.annotated_image = annotated_image
                     self.display_image(self.annotated_image)
@@ -982,12 +1018,16 @@ class PaddleOCRApp:
                     self.status_var.set(f"OCR complete! Extracted {len(extracted_lines)} text blocks. Avg confidence: {avg_conf:.2f}")
                     self.copy_button.config(state='normal')
                 else:
-                    self.text_widget.delete(1.0, tk.END)
-                    self.text_widget.insert(1.0, f"No text detected above confidence threshold ({min_confidence}).\n\nTry:\n• Lowering the confidence threshold\n• Using a clearer image\n• Selecting a different language")
+                    self.current_raw_text = ""
+                    self.original_text_widget.delete(1.0, tk.END)
+                    self.original_text_widget.insert(1.0, f"No text detected above confidence threshold ({min_confidence}).\n\nTry:\n• Lowering the confidence threshold\n• Using a clearer image\n• Selecting a different language")
+                    self.formatted_text_widget.delete(1.0, tk.END)
                     self.status_var.set("No text detected above confidence threshold")
             else:
-                self.text_widget.delete(1.0, tk.END)
-                self.text_widget.insert(1.0, "No text detected in the image.\n\nTry:\n• Using a clearer image\n• Selecting a different language")
+                self.current_raw_text = ""
+                self.original_text_widget.delete(1.0, tk.END)
+                self.original_text_widget.insert(1.0, "No text detected in the image.\n\nTry:\n• Using a clearer image\n• Selecting a different language")
+                self.formatted_text_widget.delete(1.0, tk.END)
                 self.status_var.set("No text detected in the image")
                 
         except Exception as e:
@@ -995,23 +1035,13 @@ class PaddleOCRApp:
             messagebox.showerror("OCR Error", f"Failed to process image: {str(e)}")
     
     def copy_to_clipboard(self):
-        """Copy extracted text to clipboard with output formatting"""
-        text = self.text_widget.get(1.0, tk.END).strip()
+        """Copy formatted text to clipboard"""
+        text = self.formatted_text_widget.get(1.0, tk.END).strip()
         if text:
+            pyperclip.copy(text)
             output_type = self.output_type_var.get()
-            formatter = {
-                "tweet": self.format_as_tweet,
-                "tweet thread": self.format_as_tweet_thread,
-                "quote retweet": self.format_as_quote_retweet,
-                "reddit post": self.format_as_reddit_post,
-                "reddit comment": self.format_as_reddit_comment,
-                "reddit thread": self.format_as_reddit_thread,
-            }
-            formatter_func = formatter.get(output_type, self.format_as_tweet)
-            formatted_text = formatter_func(text)
-            pyperclip.copy(formatted_text)
             self.status_var.set(
-                f"Copied {len(formatted_text)} characters as {output_type}!"
+                f"Copied {len(text)} characters as {output_type}!"
             )
 
             # Flash the copy button to provide visual feedback
@@ -1025,7 +1055,8 @@ class PaddleOCRApp:
         self.current_ocr_result = None
         self.image_label.config(image='', text="No image pasted yet\n\nPress Ctrl+V to paste an image")
         self.image_label.image = None
-        self.text_widget.delete(1.0, tk.END)
+        self.original_text_widget.delete(1.0, tk.END)
+        self.formatted_text_widget.delete(1.0, tk.END)
         self.copy_button.config(state='disabled')
         self.process_button.config(state='disabled')
         self.status_var.set("Cleared - Press Ctrl+V to paste a new image")
