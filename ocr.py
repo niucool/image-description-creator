@@ -6,6 +6,7 @@ import pyperclip
 import io
 import sys
 from paddleocr import PaddleOCR
+import re
 import numpy as np
 import tempfile
 import os
@@ -21,7 +22,10 @@ class PaddleOCRApp:
         self.annotated_image = None
         self.ocr_model = None
         self.current_ocr_result = None
-        
+
+        # Output type for formatting (tweet, tweet thread, etc.)
+        self.output_type_var = tk.StringVar(value="tweet")
+
         # Language options
         self.languages = {
             "Chinese (Simplified)": "ch",
@@ -73,7 +77,28 @@ class PaddleOCRApp:
         self.auto_process_cb = ttk.Checkbutton(control_frame, text="Auto-process image", 
                                                  variable=self.auto_process_var)
         self.auto_process_cb.pack(side=tk.LEFT, padx=(10, 0))
-        
+
+        # Output type selection
+        ttk.Label(control_frame, text="Output:").pack(
+            side=tk.LEFT, padx=(10, 5)
+        )
+        self.output_type_var = tk.StringVar(value="tweet")
+        output_combo = ttk.Combobox(
+            control_frame,
+            textvariable=self.output_type_var,
+            values=[
+                "tweet",
+                "tweet thread",
+                "quote retweet",
+                "reddit post",
+                "reddit comment",
+                "reddit thread",
+            ],
+            state="readonly",
+            width=14,
+        )
+        output_combo.pack(side=tk.LEFT, padx=(0, 5))
+
         # Paned window for split view
         paned = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True)
@@ -275,7 +300,491 @@ class PaddleOCRApp:
         """Reinitialize OCR model when language changes"""
         if self.ocr_model:
             self.init_ocr_model()
-    
+
+    # ---------------------------------------------------------------------------
+    #  Paragraph detection helpers (imported from deepseektest.py)
+    # ---------------------------------------------------------------------------
+
+    def is_bullet_point(self, text):
+        """
+        Check if text starts with a bullet point marker.
+        Supports: -, *, •, ○, ▪, numbers (1., 2.), letters (a., b.), etc.
+        """
+        if not text or not text.strip():
+            return False
+        
+        text_stripped = text.lstrip()
+        
+        # Common bullet point patterns
+        bullet_patterns = [
+            r'^[-*•○▪►→]',           # Common bullet symbols
+            r'^\d+[\.\)]',            # Numbered lists: 1., 2., 1), 2)
+            r'^[a-zA-Z][\.\)]',       # Letter lists: a., b., a), b)
+            r'^[ivxIVX]+[\.\)]',      # Roman numerals: i., ii., iii.
+            r'^[\u2022\u2023\u25E6\u2043\u2219]',  # Unicode bullets
+        ]
+        
+        for pattern in bullet_patterns:
+            if re.match(pattern, text_stripped):
+                return True
+        
+        return False
+
+    def detect_list_blocks(self, texts, start_index):
+        """
+        Detect a consecutive sequence of bullet points starting from start_index.
+        Returns the end index of the list (exclusive) or None if not a list.
+        """
+        if not texts or start_index >= len(texts):
+            return None
+        
+        # Check if current block is a bullet point
+        if not self.is_bullet_point(texts[start_index]):
+            return None
+        
+        # Find consecutive bullet points
+        end_index = start_index + 1
+        while end_index < len(texts) and self.is_bullet_point(texts[end_index]):
+            end_index += 1
+        
+        # Return the range if we have at least 2 bullet points or if it's the only one
+        # but we still want to treat single bullet points as lists
+        return end_index if end_index > start_index else None
+
+    def detect_paragraph_breaks(self, rec_boxes, texts, line_height_ratio=0.5):
+        """
+        Detect whether blocks belong to same paragraph or new paragraph.
+        Special handling for bullet points to keep them on separate lines.
+        
+        Args:
+            rec_boxes: List of [x1, y1, x2, y2] coordinates
+            texts: List of recognized text strings
+            line_height_ratio: Threshold for considering vertical gap as paragraph break
+        
+        Returns:
+            List of integers: 0 = same line (space), 1 = new paragraph (newline),
+                             2 = extra new paragraph (double newline)
+        """
+        if not rec_boxes or len(rec_boxes) == 0:
+            return [1]
+        
+        # Result codes:
+        # 0: Same line/paragraph - join with space
+        # 1: New paragraph - join with newline
+        # 2: Extra new paragraph - join with double newline
+        
+        result = [1]  # First block always starts a new paragraph
+        
+        for i in range(1, len(rec_boxes)):
+            prev_box = rec_boxes[i-1]
+            curr_box = rec_boxes[i]
+            prev_text = texts[i-1]
+            curr_text = texts[i]
+            
+            # Check if previous block ends with a Twitter timestamp
+            if self.has_twitter_timestamp(prev_text):
+                # Force a new paragraph (double newline for separation)
+                result.append(2)  # Double newline
+                continue
+            
+            # Check if current block is part of a list
+            if self.is_bullet_point(curr_text):
+                # Bullet points always get a newline (or double newline based on gap)
+                prev_bottom = prev_box[3]
+                curr_top = curr_box[1]
+                vertical_gap = curr_top - prev_bottom
+                curr_height = curr_box[3] - curr_box[1]
+                
+                # Check if gap is as wide or wider than current block height
+                if vertical_gap >= curr_height:
+                    result.append(2)  # Double newline for large gaps
+                else:
+                    result.append(1)  # Single newline for bullet points
+                continue
+            
+            # Normal (non-list) paragraph detection logic
+            prev_bottom = prev_box[3]  # y2
+            curr_top = curr_box[1]     # y1
+            
+            # Calculate heights
+            prev_height = prev_box[3] - prev_box[1]
+            curr_height = curr_box[3] - curr_box[1]
+            
+            # Calculate vertical gap
+            vertical_gap = curr_top - prev_bottom
+            
+            # Check horizontal overlap (same line/paragraph)
+            x_overlap = min(prev_box[2], curr_box[2]) - max(prev_box[0], curr_box[0])
+            
+            # Determine if same line (horizontal arrangement)
+            same_line = abs(curr_top - prev_bottom) < prev_height * 0.3 and x_overlap > 0
+            
+            if same_line:
+                # Same line - definitely same paragraph
+                result.append(0)  # Space
+            else:
+                # Different lines - check the gap size
+                # If gap is as wide or wider than current block height, use double newline
+                if vertical_gap >= curr_height:
+                    result.append(2)  # Double newline
+                elif vertical_gap > prev_height * (line_height_ratio + 1):
+                    result.append(1)  # Regular new paragraph
+                else:
+                    result.append(0)  # Same paragraph (but different line - should be space)
+        
+        return result
+
+    def group_into_paragraphs(self, texts, rec_boxes):
+        """
+        Group text blocks into paragraphs based on coordinate analysis.
+        Special handling for lists to ensure each bullet point is on its own line.
+        
+        Returns:
+            List of paragraphs, where each paragraph is a list of text strings
+            and a list of separators between paragraphs
+        """
+        if not texts or not rec_boxes or len(texts) != len(rec_boxes):
+            return [texts] if texts else [], []
+        
+        # Detect paragraph breaks and gap types
+        separators = self.detect_paragraph_breaks(rec_boxes, texts)
+        
+        # Group into paragraphs
+        paragraphs = []
+        current_paragraph = []
+        
+        for i, (text, sep) in enumerate(zip(texts, separators)):
+            if i == 0:
+                # First block always starts a paragraph
+                current_paragraph.append(text)
+            elif sep == 0:
+                # Same paragraph, add with space
+                current_paragraph.append(text)
+            else:
+                # New paragraph (sep=1 or 2)
+                if current_paragraph:
+                    paragraphs.append((current_paragraph, separators[i]))
+                current_paragraph = [text]
+        
+        # Add the last paragraph
+        if current_paragraph:
+            paragraphs.append((current_paragraph, 1))  # Default separator for last paragraph
+        
+        return paragraphs
+
+    def format_text_with_paragraphs(self, texts, rec_boxes):
+        """
+        Format text with proper paragraph detection.
+        Joins text within same paragraph with spaces, and paragraphs with newlines.
+        Special handling for lists to ensure proper formatting.
+        Extra newlines added when gap >= current block height.
+        """
+        if not texts:
+            return ""
+        
+        # If no boxes available, fall back to simple newline joining
+        if not rec_boxes or len(texts) != len(rec_boxes):
+            # Still apply list detection even without boxes
+            formatted_lines = []
+            for text in texts:
+                if self.is_bullet_point(text):
+                    formatted_lines.append(text)
+                else:
+                    if formatted_lines and not self.is_bullet_point(formatted_lines[-1]):
+                        formatted_lines[-1] += " " + text
+                    else:
+                        formatted_lines.append(text)
+            return "\n".join(formatted_lines)
+        
+        # Group texts into paragraphs with separators
+        paragraphs_with_seps = self.group_into_paragraphs(texts, rec_boxes)
+        
+        # Join within paragraphs with spaces, between paragraphs with appropriate newlines
+        formatted_lines = []
+        
+        for para_idx, (paragraph, separator) in enumerate(paragraphs_with_seps):
+            # Check if this paragraph is a list of bullet points
+            if len(paragraph) > 1 and all(self.is_bullet_point(item) for item in paragraph):
+                # This is a list - join with newlines instead of spaces
+                for bullet_item in paragraph:
+                    formatted_lines.append(bullet_item)
+            elif len(paragraph) == 1 and self.is_bullet_point(paragraph[0]):
+                # Single bullet point - add as its own line
+                formatted_lines.append(paragraph[0])
+            else:
+                # Normal paragraph - join with spaces
+                paragraph_text = " ".join(paragraph)
+                formatted_lines.append(paragraph_text)
+            
+            # Add separator between paragraphs (except after the last one)
+            if para_idx < len(paragraphs_with_seps) - 1:
+                if separator == 2:
+                    formatted_lines.append("")  # Double newline
+                # separator == 1 gets a single newline (default when joining with \n)
+        
+        # Join paragraphs with newlines
+        return "\n".join(formatted_lines)
+
+    # ---------------------------------------------------------------------------
+    #  Handle detection and output formatting
+    # ---------------------------------------------------------------------------
+
+    def has_twitter_timestamp(self, text):
+        """
+        Check if text contains a Twitter-style timestamp.
+        Detects patterns like '· 23h', '· 1d', '· 3w', '· Jan 3', '· 14:30'.
+        """
+        if not text or not text.strip():
+            return False
+
+        timestamp_pattern = re.compile(
+            r"·\s+"
+            r"(?:"
+            r"\d+[hmdw]"
+            r"|"
+            r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}"
+            r"|"
+            r"\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?"
+            r"|"
+            r"(?:Just now|Yesterday|Today|\d+\s+(?:min|hour|day|week|month|year)s?\s+ago)"
+            r")"
+            r"\s*"
+            r"(?:[×Xx]|Follow(?:ing)?|Repost(?:ed)?|Like(?:d)?|Reply(?:ing)?|"
+            r"\d+(?:\.\d+)?[KkMm]?|@\w+)?"
+            r"\s*$",
+            re.IGNORECASE,
+        )
+
+        return bool(timestamp_pattern.search(text.strip()))
+
+    def detect_handles(self, text):
+        """
+        Scan OCR text for Twitter handles (@username).
+        Removes lines containing handles and strips the nickname text immediately
+        before a handle (e.g. 'John Doe @johndoe'), since that text is usually the
+        poster's display name.
+
+        Also handles the case where OCR splits nickname and handle across two lines:
+            John Doe
+            @johndoe
+        -> both the nickname line and the @handle line are removed.
+
+        Returns: (handles_list, cleaned_text)
+        """
+        if not text:
+            return [], text
+
+        lines = text.split("\n")
+        handles = []
+        cleaned_lines = []
+        skip_next = False  # flag to skip a line that is a nickname for the next @handle line
+
+        for i, line in enumerate(lines):
+            if skip_next:
+                skip_next = False
+                continue
+
+            stripped = line.strip()
+
+            # Case 1: nickname and handle on the same line, e.g. "John Doe @johndoe"
+            match = re.match(r"^(.{0,20}?)@([\w.]+)$", stripped)
+            if match:
+                handle = "@" + match.group(2)
+                handles.append(handle)
+                # Remove the entire line (nickname + handle) from the body
+                continue
+
+            # Case 2: this line is just a @handle by itself
+            handle_match = re.match(r"^@([\w.]+)$", stripped)
+            if handle_match:
+                handle = "@" + handle_match.group(1)
+                handles.append(handle)
+                # Remove the handle line from the body
+                continue
+
+            # Case 3: this line might be a nickname, and the next line is @handle
+            if i + 1 < len(lines):
+                next_stripped = lines[i + 1].strip()
+                next_handle = re.match(r"^@([\w.]+)$", next_stripped)
+                if next_handle:
+                    # Current line is a nickname, next line is the handle
+                    handle = "@" + next_handle.group(1)
+                    handles.append(handle)
+                    # Skip both the nickname line and the handle line
+                    skip_next = True
+                    continue
+
+            # Not a handle-related line, keep as-is
+            cleaned_lines.append(line)
+
+        return handles, "\n".join(cleaned_lines)
+
+    def strip_timestamps(self, text):
+        """Remove lines that contain Twitter-style timestamps."""
+        if not text:
+            return text
+        lines = text.split("\n")
+        cleaned = [
+            line
+            for line in lines
+            if not self.has_twitter_timestamp(line.strip())
+        ]
+        return "\n".join(cleaned)
+
+    def split_into_tweet_chunks(self, text, max_chars=280):
+        """
+        Split text into chunks of max_chars, breaking at sentence boundaries
+        (period, newline, etc.) when possible.
+        """
+        if not text:
+            return []
+
+        chunks = []
+        paragraphs = text.split("\n\n")
+
+        current_chunk = ""
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
+            if len(current_chunk) + len(para) + 2 > max_chars and current_chunk:
+                chunks.append(current_chunk.strip())
+                current_chunk = para
+            else:
+                if current_chunk:
+                    current_chunk += "\n\n" + para
+                else:
+                    current_chunk = para
+
+        if current_chunk:
+            chunks.append(current_chunk.strip())
+
+        final_chunks = []
+        for chunk in chunks:
+            if len(chunk) <= max_chars:
+                final_chunks.append(chunk)
+            else:
+                sentences = re.split(r"(?<=[.!?])\s+", chunk)
+                temp = ""
+                for sent in sentences:
+                    if len(temp) + len(sent) + 1 > max_chars and temp:
+                        final_chunks.append(temp.strip())
+                        temp = sent
+                    else:
+                        if temp:
+                            temp += " " + sent
+                        else:
+                            temp = sent
+                if temp:
+                    final_chunks.append(temp.strip())
+
+        return final_chunks
+
+    def format_as_tweet(self, text):
+        """
+        Format as: 'tweet by @handle that says [body]'
+        Strips timestamps and handle lines from the body.
+        """
+        if not text:
+            return text
+
+        cleaned = self.strip_timestamps(text)
+        handles, cleaned = self.detect_handles(cleaned)
+        cleaned = cleaned.strip()
+
+        handle_str = handles[0] if handles else "@unknown"
+        return f"tweet by {handle_str} that says \n{cleaned}"
+
+    def format_as_tweet_thread(self, text):
+        """
+        Format as:
+        tweet thread that goes as follows
+
+        @handle1:
+        > [chunk1]
+
+        @handle2:
+        > [chunk2]
+        ...
+        """
+        if not text:
+            return text
+
+        cleaned = self.strip_timestamps(text)
+        handles, cleaned = self.detect_handles(cleaned)
+        cleaned = cleaned.strip()
+
+        chunks = self.split_into_tweet_chunks(cleaned, 280)
+
+        if not chunks:
+            return text
+
+        lines = ["tweet thread that goes as follows", ""]
+        for i, chunk in enumerate(chunks):
+            handle = handles[i] if i < len(handles) else (
+                handles[-1] if handles else "@unknown"
+            )
+            lines.append(f"{handle}:")
+            lines.append(f"> {chunk}")
+            if i < len(chunks) - 1:
+                lines.append("")
+
+        return "\n".join(lines)
+
+    def format_as_quote_retweet(self, text):
+        """
+        Format as:
+        quote retweet. the original tweet is by @handle_a and says
+        > [original_text]. @handle_b then quote retweets this and says
+        > [comment_text]
+        """
+        if not text:
+            return text
+
+        cleaned = self.strip_timestamps(text)
+        handles, cleaned = self.detect_handles(cleaned)
+        cleaned = cleaned.strip()
+
+        parts = re.split(r"\n\n+", cleaned, maxsplit=1)
+
+        if len(parts) >= 2:
+            original_text = parts[0].strip()
+            comment_text = parts[1].strip()
+        else:
+            mid = len(cleaned) // 2
+            split_pos = cleaned.rfind("\n\n", 0, mid)
+            if split_pos == -1:
+                split_pos = cleaned.rfind(". ", 0, mid)
+                if split_pos != -1:
+                    split_pos += 1
+                else:
+                    split_pos = mid
+            original_text = cleaned[:split_pos].strip()
+            comment_text = cleaned[split_pos:].strip()
+
+        handle_a = handles[0] if len(handles) > 0 else "@original"
+        handle_b = handles[1] if len(handles) > 1 else (
+            handles[0] if handles else "@commenter"
+        )
+
+        return (
+            f"quote retweet. the original tweet is by {handle_a} and says\n"
+            f"> {original_text}. \n{handle_b} then quote retweets this and says\n"
+            f"> {comment_text}"
+        )
+
+    def format_as_reddit_post(self, text):
+        """WIP: Return raw OCR text unchanged."""
+        return text
+
+    def format_as_reddit_comment(self, text):
+        """WIP: Return raw OCR text unchanged."""
+        return text
+
+    def format_as_reddit_thread(self, text):
+        """WIP: Return raw OCR text unchanged."""
+        return text
+
     def paste_from_clipboard(self, event=None):
         """Handle image paste from clipboard"""
         try:
@@ -333,16 +842,39 @@ class PaddleOCRApp:
             self.status_var.set("Processing image with PaddleOCR...")
             self.root.update()
             
+            # Resize large images to prevent memory exhaustion during OCR.
+            # Very tall images (e.g. Twitter thread screenshots) can cause
+            # PaddleOCR to detect hundreds of text blocks, each requiring a
+            # separate recognition inference — which can exhaust system memory.
+            # We limit the max dimension to 1280px while preserving aspect ratio.
+            img = self.current_image
+            max_dim = 1280
+            if max(img.size) > max_dim:
+                scale = max_dim / max(img.size)
+                new_size = (int(img.width * scale), int(img.height * scale))
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+                self.status_var.set(f"Resized image from {self.current_image.size} to {new_size} for OCR...")
+                self.root.update()
+            
             # Convert PIL Image to format PaddleOCR expects
             # Save to bytes, then read - simpler approach
             with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
                 temp_path = tmp_file.name
-                self.current_image.save(temp_path, 'PNG')
+                img.save(temp_path, 'PNG')
             
-            # Perform OCR using PaddleOCR
-            # Result format: list of lists containing [[coordinates], (text, confidence)]
-            result = self.ocr_model.predict(temp_path)
-            
+            # Perform OCR using PaddleOCR.
+            # Force the text detection model to internally resize images so the
+            # longest side is at most 960px (limit_type="max"). The default config
+            # uses limit_type="min" with limit_side_len=64, which acts as a minimum
+            # size floor — it does NOT downscale large images. Without this, dense
+            # screenshots like Twitter threads produce many text blocks that exhaust
+            # memory during text recognition.
+            result = self.ocr_model.predict(
+                temp_path,
+                text_det_limit_side_len=960,
+                text_det_limit_type="max",
+            )
+        
             # Clean up temp file
             os.unlink(temp_path)
             
@@ -351,13 +883,17 @@ class PaddleOCRApp:
                 min_confidence = self.confidence_var.get()
                 extracted_lines = []
                 confidence_info = []
+                rec_boxes = []  # Store bounding boxes for paragraph detection
                 
                 annotated_image = self.current_image.copy()
                 draw = ImageDraw.Draw(annotated_image)
                 
                 # result[0] contains the detection results for the first image
-                if hasattr(result[0], 'json') and isinstance(result[0].json, dict) and 'res' in result[0].json:
-                    res = result[0].json['res']
+                # Access .json once to avoid triggering _to_json() multiple times
+                # (hasattr calls the property getter, so each access is expensive)
+                result_json = result[0].json if hasattr(result[0], 'json') else None
+                if result_json is not None and isinstance(result_json, dict) and 'res' in result_json:
+                    res = result_json['res']
                     texts = res.get('rec_texts', [])
                     scores = res.get('rec_scores', [])
                     polys = res.get('dt_polys', []) or res.get('rec_polys', [])
@@ -368,6 +904,11 @@ class PaddleOCRApp:
                             confidence_info.append(f"{confidence:.2f}")
                             if i < len(polys):
                                 poly = polys[i]
+                                # Convert polygon to bounding box [x1, y1, x2, y2]
+                                all_x = [p[0] for p in poly]
+                                all_y = [p[1] for p in poly]
+                                bbox = [min(all_x), min(all_y), max(all_x), max(all_y)]
+                                rec_boxes.append(bbox)
                                 points = [(p[0], p[1]) for p in poly]
                                 if points:
                                     points.append(points[0])
@@ -384,6 +925,11 @@ class PaddleOCRApp:
                             confidence_info.append(f"{confidence:.2f}")
                             if i < len(polys):
                                 poly = polys[i]
+                                # Convert polygon to bounding box [x1, y1, x2, y2]
+                                all_x = [p[0] for p in poly]
+                                all_y = [p[1] for p in poly]
+                                bbox = [min(all_x), min(all_y), max(all_x), max(all_y)]
+                                rec_boxes.append(bbox)
                                 points = [(p[0], p[1]) for p in poly]
                                 if points:
                                     points.append(points[0])
@@ -397,15 +943,34 @@ class PaddleOCRApp:
                         if confidence >= min_confidence:
                             extracted_lines.append(text)
                             confidence_info.append(f"{confidence:.2f}")
+                            # Convert polygon to bounding box
+                            all_x = [p[0] for p in poly]
+                            all_y = [p[1] for p in poly]
+                            bbox = [min(all_x), min(all_y), max(all_x), max(all_y)]
+                            rec_boxes.append(bbox)
                             points = [(p[0], p[1]) for p in poly]
                             if points:
                                 points.append(points[0])
                                 draw.line(points, fill="red", width=2)
                 
                 if extracted_lines:
-                    full_text = "\n".join(extracted_lines)
+                    # Use paragraph-aware formatting with bounding boxes
+                    raw_text = self.format_text_with_paragraphs(extracted_lines, rec_boxes)
                     
-                    # Clear text widget and insert extracted text
+                    # Apply selected output formatting
+                    output_type = self.output_type_var.get()
+                    formatter = {
+                        "tweet": self.format_as_tweet,
+                        "tweet thread": self.format_as_tweet_thread,
+                        "quote retweet": self.format_as_quote_retweet,
+                        "reddit post": self.format_as_reddit_post,
+                        "reddit comment": self.format_as_reddit_comment,
+                        "reddit thread": self.format_as_reddit_thread,
+                    }
+                    formatter_func = formatter.get(output_type, self.format_as_tweet)
+                    full_text = formatter_func(raw_text)
+                    
+                    # Clear text widget and insert formatted text
                     self.text_widget.delete(1.0, tk.END)
                     self.text_widget.insert(1.0, full_text)
                     
@@ -430,12 +995,25 @@ class PaddleOCRApp:
             messagebox.showerror("OCR Error", f"Failed to process image: {str(e)}")
     
     def copy_to_clipboard(self):
-        """Copy extracted text to clipboard"""
+        """Copy extracted text to clipboard with output formatting"""
         text = self.text_widget.get(1.0, tk.END).strip()
         if text:
-            pyperclip.copy(text)
-            self.status_var.set(f"Copied {len(text)} characters to clipboard!")
-            
+            output_type = self.output_type_var.get()
+            formatter = {
+                "tweet": self.format_as_tweet,
+                "tweet thread": self.format_as_tweet_thread,
+                "quote retweet": self.format_as_quote_retweet,
+                "reddit post": self.format_as_reddit_post,
+                "reddit comment": self.format_as_reddit_comment,
+                "reddit thread": self.format_as_reddit_thread,
+            }
+            formatter_func = formatter.get(output_type, self.format_as_tweet)
+            formatted_text = formatter_func(text)
+            pyperclip.copy(formatted_text)
+            self.status_var.set(
+                f"Copied {len(formatted_text)} characters as {output_type}!"
+            )
+
             # Flash the copy button to provide visual feedback
             self.copy_button.config(text="✓ Copied!")
             self.root.after(2000, lambda: self.copy_button.config(text="📋 Copy to Clipboard"))
